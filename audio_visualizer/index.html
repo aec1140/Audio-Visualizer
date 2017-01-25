@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>Web Audio Visualizer</title>
+
+	<link href="https://fonts.googleapis.com/css?family=Audiowide" rel="stylesheet">
+
+	<style>
+	body, header{
+         background: #eeeeee;
+         font-family: Audiowide, verdana, sans serif;
+         width: 905px;
+		 overflow-y:hidden;
+    }
+
+    header {
+    	text-align: center;
+    	font-size: 25px;
+
+    }
+
+    #display {
+        background: gray;
+    }
+
+    #filters, #style, #controls {
+    	 margin: 10px;
+         margin-left: 0px;
+    }
+
+    #audioData {
+    	width: 640px;
+        margin-left: 10px;
+        margin-bottom: 10px;
+    }
+
+    #myFile {
+    	display:none;
+    }
+
+    #mainCanvas {
+        margin:10px;
+        box-shadow:4px 4px 8px rgba(0,0,0,0.5);
+        background:black;
+    }
+
+    #soundBoard {
+    	margin:10px;
+        box-shadow:4px 4px 8px rgba(0,0,0,0.5);
+        background:black;
+        position:fixed;
+    }
+
+    #graph {
+    	position:fixed;
+    	background:gray;
+    }
+
+    #lowGain, #midGain, #highGain {
+    	position:absolute;
+    	background:white;
+    	box-shadow:2px 2px 4px rgba(255,255,255,0.5);
+    }
+      
+	</style>
+	<script>
+	// An IIFE ("Iffy") - see the notes in mycourses
+	(function(){
+		"use strict";
+		
+		var NUM_SAMPLES = 256;
+
+		var SOUND_1 = 'media/New Adventure Theme.mp3';
+		var SOUND_2 = 'media/Peanuts Theme.mp3';
+		var SOUND_3 = 'media/The Picard Song.mp3';
+		var SOUND_4 = 'media/Infinite Power.mp3';
+		var SLIDER_MAX;
+		var SLIDER_MIN;
+		var MAX_GAIN = 40.0; // dB
+		var MIN_GAIN = -40.0;
+
+		var audioElement;
+		var analyserNode;
+
+		var canvas,ctx,sbCtx,sbCanvas,gCtx,gCanvas;
+		var invert,mirror,grayscale;
+		var currentStyle = "rainbowCircle";
+		var currentTime, title = [];
+		var data;
+
+		var oscillatingIndex = 0;
+
+		// SLiders
+		var lowGain,midGain,highGain;
+		var Slider = function(canvas) {
+			this.canvas = canvas;
+			this.ctx = this.canvas.getContext("2d");
+			this.node; // audio node
+		};
+
+		Slider.prototype.draw = function() {
+			this.ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
+			this.ctx.strokeStyle = 'rgba(0,0,0,.4)';
+			this.ctx.lineWidth = 3;
+
+			// 3 lines
+			for (var i = 0; i < 3; ++i) {
+				this.ctx.beginPath();
+				this.ctx.moveTo(5,this.canvas.height/2 - 6 + (i*6));
+				this.ctx.lineTo(this.canvas.width-5,this.canvas.height/2 - 6 + (i*6));
+				this.ctx.stroke();
+			}	
+		};
+		var currentSlider,dragging=false;
+		var sbRect;
+
+		// gradient colors
+		var topGrd, botGrd;
+		
+		function init(){
+			window.URL = window.URL || window.webkitURL;
+
+			// set up canvas stuff
+			canvas = document.querySelector('#mainCanvas');
+			ctx = canvas.getContext("2d");
+
+			sbCanvas = document.querySelector('#soundBoard');
+			sbCtx = sbCanvas.getContext("2d");
+
+			gCanvas = document.querySelector('#graph');
+			gCtx = gCanvas.getContext("2d");
+
+			// setup canvas sliders
+			lowGain = new Slider(document.querySelector('#lowGain'));
+			midGain = new Slider(document.querySelector('#midGain'));
+			highGain = new Slider(document.querySelector('#highGain'));
+
+			// position canvas elements dynamically
+			sbRect = sbCanvas.getBoundingClientRect();
+
+			// position grid
+			document.getElementById("graph").style.left = sbRect.left + 10 + "px";
+			document.getElementById("graph").style.top = sbRect.top + 25 + "px";
+
+			SLIDER_MAX = sbCanvas.height - 230;
+			SLIDER_MIN = sbCanvas.height - 10;
+			var startY = sbRect.top - 20 + (SLIDER_MAX + SLIDER_MIN) / 2; // Offset from top and subtract half the height
+
+			var xOffset = sbCanvas.width / 4;
+
+			// Position sliders
+			document.getElementById("lowGain").style.left = sbRect.left + xOffset - 10 + "px";
+			document.getElementById("lowGain").style.top = startY + "px";
+			document.getElementById("midGain").style.left = sbRect.left + xOffset*2 - 10 + "px";
+			document.getElementById("midGain").style.top = startY  + "px";
+			document.getElementById("highGain").style.left = sbRect.left + xOffset*3 - 10 + "px";
+			document.getElementById("highGain").style.top = startY + "px";
+
+			
+			// get reference to <audio> element on page
+			audioElement = document.querySelector('audio');
+			
+			// call our helper function and get an analyser node
+			analyserNode = createWebAudioContextWithAnalyserNode(audioElement);
+			
+			// get sound track <select> and Full Screen button working
+			setupUI();
+			
+			// load and play default sound into audio element
+			title = formatTitle("Infinte Power");
+			playStream(audioElement,SOUND_4,"Infinite Power");
+			
+			// start animation loop
+			update();
+		}
+		
+		
+		function createWebAudioContextWithAnalyserNode(audioElement) {
+			var audioCtx, analyserNode, sourceNode;
+			// create new AudioContext
+			// The || is because WebAudio has not been standardized across browsers yet
+			// http://webaudio.github.io/web-audio-api/#the-audiocontext-interface
+			audioCtx = new (window.AudioContext || window.webkitAudioContext);
+			
+			// create an analyser node
+			analyserNode = audioCtx.createAnalyser();
+
+			// create gain nodes
+			// using example from http://stackoverflow.com/questions/20422444/is-there-way-to-apply-eq-effects-in-html-5-web-audio-api
+
+			var low = lowGain.node = audioCtx.createBiquadFilter();
+			low.type = "lowshelf";
+			low.frequency.value = 320.0;
+			low.gain.value = 0.0; // range of -40dB to 40dB
+
+			var mid = midGain.node = audioCtx.createBiquadFilter();
+			mid.type = "peaking";
+			mid.frequency.value = 1000.0
+			mid.Q.value = 0.5;
+			mid.gain.value = 0.0;
+
+			var high = highGain.node = audioCtx.createBiquadFilter();
+			high.type = "highshelf";
+			high.frequency.value = 3200.0
+			high.gain.value = 0.0;
+			
+			/*
+			We will request NUM_SAMPLES number of samples or "bins" spaced equally 
+			across the sound spectrum.
+			
+			If NUM_SAMPLES (fftSize) is 256, then the first bin is 0 Hz, the second is 172 Hz, 
+			the third is 344Hz. Each bin contains a number between 0-255 representing 
+			the amplitude of that frequency.
+			*/ 
+			
+			// fft stands for Fast Fourier Transform
+			analyserNode.fftSize = NUM_SAMPLES;
+			
+			// this is where we hook up the <audio> element to the analyserNode
+			sourceNode = audioCtx.createMediaElementSource(audioElement); 
+			sourceNode.connect(analyserNode);
+			
+			// here we connect to the destination i.e. speakers
+			analyserNode.connect(low);
+			lowGain.node.connect(mid);
+			mid.connect(high);
+			high.connect(audioCtx.destination);
+
+			return analyserNode;
+		}
+		
+		function setupUI(){
+			document.querySelector("#trackSelect").onchange = function(e){
+
+				// user wants to add a new file
+				if (e.target.value == "select") {
+					document.getElementById("myFile").click();
+				}
+
+				// format the html text so we can use it elsewhere
+				// need to use html text instead otherwise we get blob address when reusing added songs
+				else {
+					e.preventDefault();
+					title = "";
+					formatTitle(this.options[this.selectedIndex].innerHTML);
+
+					// build the name
+					var name = '';
+					title.forEach(function(str){
+						name += str;
+					});
+
+					playStream(audioElement,e.target.value,name);
+				}
+			};
+			
+			document.querySelector("#fsButton").onclick = function(){
+				requestFullscreen(canvas);
+			};
+
+			// Checkboxes
+			document.querySelector("#invertCheckbox").onchange = function(e){
+				invert = e.target.checked;
+			 };
+			document.querySelector("#grayscaleCheckbox").onchange = function(e){
+				grayscale = e.target.checked;
+			 };
+			document.querySelector("#mirrorCheckbox").onchange = function(e){
+				mirror = e.target.checked;
+			 };
+			document.querySelector("#visualStyle").onchange = function(e){
+				currentStyle = e.target.value;
+			 };
+
+			// Hacky fix but this works
+			document.getElementById("myFile").addEventListener("change", function () {
+				handleFiles(this.files);
+			}, false);
+
+			// Drag drop
+			var dropArea = document.getElementById("mainCanvas");
+			dropArea.addEventListener("dragenter", dragenter, false);
+			dropArea.addEventListener("dragover", dragover, false);
+			dropArea.addEventListener("drop", drop, false);
+			dropArea.addEventListener("dragleave", dragleave, false);
+
+			// soundboard
+
+			// low gain
+			var low = document.getElementById("lowGain");
+			low.addEventListener("mouseover", mouseover, false);
+			low.addEventListener("mouseleave", mouseleave, false);
+			low.addEventListener("mousedown", mousedown, false);
+			low.addEventListener("mouseup",mouseup,false);
+			low.addEventListener("mousemove",mousemove,false);
+
+			// mid gain
+			var mid = document.getElementById("midGain");
+			mid.addEventListener("mouseover", mouseover, false);
+			mid.addEventListener("mouseleave", mouseleave, false);
+			mid.addEventListener("mousedown", mousedown, false);
+			mid.addEventListener("mouseup",mouseup,false);
+			mid.addEventListener("mousemove",mousemove,false);
+
+			// high gain
+			var high = document.getElementById("highGain");
+			high.addEventListener("mouseover", mouseover, false);
+			high.addEventListener("mouseleave", mouseleave, false);
+			high.addEventListener("mousedown", mousedown, false);
+			high.addEventListener("mouseup",mouseup,false);
+			high.addEventListener("mousemove",mousemove,false);
+
+			// gain movement
+			var board = document.getElementById("soundBoard");
+			board.addEventListener("mouseup",mouseup,false);
+			board.addEventListener("mousemove",mousemove,false);
+
+		}
+		
+		function playStream(audioElement,path,name){
+
+			audioElement.src = path;
+			audioElement.play();
+			audioElement.volume = 0.5;
+			document.querySelector('#status').innerHTML = "Now playing: " + name;
+		}
+		
+		function update() { 
+			// this schedules a call to the update() method in 1/60 seconds
+			requestAnimationFrame(update);
+			
+			if (currentStyle == "singleBar") {
+				// Waveform data
+				analyserNode.fftSize = 4096;
+				data = new Uint8Array(4096/2);
+				analyserNode.getByteTimeDomainData(data);
+			}
+			else {
+				// frequency data
+				analyserNode.fftSize = NUM_SAMPLES;
+				data = new Uint8Array(NUM_SAMPLES/2);
+				analyserNode.getByteFrequencyData(data);
+			}
+		
+			// Update current time
+			currentTime	= formatTime(document.querySelector('#audioData').currentTime);
+			
+			// DRAW!
+			ctx.clearRect(0,0,800,600);  
+			var barWidth = 9;
+
+			drawSoundBoard();
+
+			// draw current style
+			switch(currentStyle) {
+				case "rainbowCircle":
+					drawRainbow(barWidth);
+					break;
+				case "doubleBar":
+					drawDouble(barWidth);
+					break;
+				case "singleBar":
+					drawSingle();
+					break;
+				case "circles":
+					var xOffset = canvas.width / 6;
+					drawCircle(xOffset, lowGain.node.gain.value);
+					drawCircle(xOffset*3, midGain.node.gain.value);
+					drawCircle(xOffset*5, highGain.node.gain.value);
+					break;
+			}
+
+			manipulatePixels();
+			drawTitle();
+		}
+
+		// Draws the oscillatting line and colors it with a oscillating color
+		function drawSingle() {
+			ctx.save();
+
+			ctx.lineWidth = 2;
+			var frequency = .1;
+			
+			// http://krazydad.com/tutorials/makecolors.php using oscillating logic for colors
+			var red   = Math.floor(Math.sin(frequency*oscillatingIndex + 0) * 127 + 128);
+		    var green = Math.floor(Math.sin(frequency*oscillatingIndex + 2) * 127 + 128);
+		    var blue  = Math.floor(Math.sin(frequency*oscillatingIndex + 4) * 127 + 128);
+
+		    oscillatingIndex += 1;
+		    oscillatingIndex %= 128;
+
+			ctx.strokeStyle = makeColor(red,green,blue,1);
+			ctx.beginPath();
+
+		    var width = canvas.width * 1.0 / data.length;
+		    var x = 0;
+
+		    // https://developer.mozilla.org/en-US/docs/Web/API/AnalyserNode for oscillator positioning
+		    for(var i = 0; i < data.length; i++) {
+		   
+		    	var v = data[i] / 128.0;
+		    	var y = v * canvas.height/2;
+
+		    	if(i === 0) {
+		      		ctx.moveTo(x, y);
+		        } else {
+		        	ctx.lineTo(x, y);
+		        }
+
+		        x += width;
+		    }
+
+		    ctx.lineTo(canvas.width, canvas.height/2);
+		    ctx.stroke();
+		    ctx.restore();
+		}
+
+        // Draws a circle of bars the react the the changing frequencies
+        // The center radius is hooked up to low frequencies as to mimic the bass of a subwoofer
+		function drawRainbow(barWidth) {
+			ctx.save()
+
+			var maxHeight = 100;
+			var numLines = 28;
+			var freqRatio = Math.floor(data.length / numLines);
+
+			var circleRadius = Math.max((data[0] / 2.5), 75);
+			var sin = Math.sin(Math.PI/(numLines/2));
+			var cos = Math.cos(Math.PI/(numLines/2));
+
+			ctx.translate(canvas.width / 2, canvas.height / 2);
+			ctx.lineWidth = barWidth / 2;
+			ctx.lineCap="round";
+
+			for (var i=0; i < numLines; ++i) {
+
+				var height = Math.min(Math.max(data[i*freqRatio] / 2 + 5,5), maxHeight);
+
+			    // colors
+			    switch (i) {
+			    	case 0: 
+			    		ctx.strokeStyle = "#ff0000";
+			    		break;
+			    	case Math.floor(numLines/7 * 1):
+			    		ctx.strokeStyle = "#ff7f00";
+			    		break;
+			    	case Math.floor(numLines/7 * 2):
+			    		ctx.strokeStyle = "#ffff00";
+			    		break;
+			    	case Math.floor(numLines/7 * 3):
+			    		ctx.strokeStyle = "#00ff00";
+			    		break;
+			    	case Math.floor(numLines/7 * 4):
+			    		ctx.strokeStyle = "#0000ff";
+			    		break;
+			    	case Math.floor(numLines/7 * 5):
+			    		ctx.strokeStyle = "#4b0082";
+			    		break;
+			    	case Math.floor(numLines/7 * 6):
+			    		ctx.strokeStyle = "#8f00ff";
+			    		break;
+			    }
+
+			    ctx.beginPath();
+			    ctx.moveTo(0, circleRadius);
+			    ctx.lineTo(0, circleRadius + height/2);
+				ctx.transform(cos, sin, -sin, cos, 0, 0);
+				ctx.stroke();
+			}
+
+			ctx.restore();
+		}
+
+        // Draws the standard audio bar with a gradient from green to yellow to red to indicate the strength of the frequency
+		function drawDouble(barWidth) {
+			ctx.save();
+
+			var barSpacing = 1;
+			var barHeight = 20;
+			var topSpacing = 0;
+            var numLines = canvas.width / barWidth;
+            var freqRatio = Math.floor(data.length / numLines);
+			var bottomSpacing = canvas.height - (topSpacing);
+
+			topGrd = ctx.createLinearGradient(0,topSpacing,0,canvas.height/4);
+			topGrd.addColorStop(0, 'rgba(0,255,0,1)');
+			topGrd.addColorStop(.5,'rgba(255,255,0,1)');
+			topGrd.addColorStop(1,'rgba(255,0,0,1)');
+
+			botGrd = ctx.createLinearGradient(0,canvas.height - topSpacing,0,canvas.height/4 * 3);
+			botGrd.addColorStop(0,'rgba(0,255,0,1)');
+			botGrd.addColorStop(.5,'rgba(255,255,0,1)');
+			botGrd.addColorStop(1,'rgba(255,0,0,1)');
+			
+			// Draw duel bars
+			for (var i = 0; i < numLines; ++i) {
+				// top
+				var x = i * (barWidth + barSpacing);		
+
+				var height = Math.max(data[i * freqRatio] / 2 + 5,5);
+
+				ctx.fillStyle = topGrd;
+				ctx.fillRect(x,topSpacing,barWidth,height);
+
+				// bottom
+				ctx.fillStyle = botGrd;
+				ctx.fillRect(x,bottomSpacing-5 - (data[i] / 2),barWidth,height);
+			}
+			ctx.restore();
+		}
+
+		// draws the soundboard UI
+		function drawSoundBoard() {
+			drawGraph();
+
+			// sliders
+			sbCtx.lineWidth = 5;
+			sbCtx.strokeStyle = "gray";
+
+			sbCtx.fillStyle = "white";
+			sbCtx.textAlign="center";
+			sbCtx.textBaseline="middle";
+			sbCtx.font = "13px Times New Roman";
+
+			sbCtx.fillText("Gain Filter", sbCanvas.width/2, 14);
+
+			for (var i = 1; i < 4; ++i) {
+				sbCtx.save();
+
+				var x = sbCanvas.width / 4 * i;
+				sbCtx.beginPath();
+				sbCtx.moveTo(x, SLIDER_MIN);
+				sbCtx.lineTo(x, SLIDER_MAX);
+				sbCtx.stroke();
+
+				sbCtx.translate(x, SLIDER_MAX - 10);
+				// draw text
+				switch(i) {
+					case 1:
+						sbCtx.fillText("Low", 0, 0);
+						break;
+					case 2:
+						sbCtx.fillText("Med", 0, 0);
+						break;
+					case 3:
+						sbCtx.fillText("High", 0, 0);
+						break;
+				}
+
+				sbCtx.restore();
+			}
+
+			// draw slider details
+			lowGain.draw();
+			midGain.draw();
+			highGain.draw();
+		}
+
+		// draw soundboard graph
+		function drawGraph() {
+			// draw grid
+			gCtx.clearRect(0,0,gCanvas.width,gCanvas.height);
+			gCtx.strokeStyle = 'rgba(255,255,255,0.4)';
+			gCtx.fillStyle = 'rgba(0,0,0,1)';
+			gCtx.lineWidth = 2;
+			gCtx.textAlign="center";
+			gCtx.textBaseline="middle";
+			ctx.font = "8px serif";
+
+			// Hrz lines
+			var yOffset = gCanvas.height / 2 - 40;
+			for (var i = 0; i < 3; ++i) {
+				gCtx.save();
+				gCtx.translate(0, yOffset + (40 * i));
+
+				gCtx.beginPath();
+				gCtx.moveTo(0,0);
+				gCtx.lineTo(gCanvas.width, 0);
+				gCtx.stroke();
+
+				// -40dB to 40 dB
+				var db = (i == 2) ? "-" : " ";
+				db += ((40 + 40 * i) % 80) + "dB";
+
+				gCtx.fillText(db,15,8);
+
+				gCtx.restore();
+			}
+
+			// Vert lines
+			var xOffset = gCanvas.width / 6;
+			for (var i = 0; i < 3; ++i) {
+				gCtx.save();
+				gCtx.translate(xOffset * (1 + 2 * i), 0);
+
+				gCtx.beginPath();
+				gCtx.moveTo(0, 0);
+				gCtx.lineTo(0, gCanvas.height);
+				gCtx.stroke();
+
+				// 360Hz - 3600Hz
+				var hz;
+				switch(i) {
+					case 0:
+						hz = "360Hz";
+						break 
+					case 1:
+						hz = "1000Hz";
+						break;
+					case 2:
+						hz = "3600Hz";
+						break;
+				}
+				gCtx.fillText(hz,0,6);
+
+				gCtx.restore();		
+			}
+
+			// draw curve & shade
+			var x = gCanvas.width / 6;
+			var y = gCanvas.height / 2;
+			gCtx.strokeStyle = 'rgba(255,255,255,1)';
+			gCtx.fillStyle = 'rgba(255,255,255,0.4)';
+
+			gCtx.beginPath();
+			gCtx.moveTo(0,y - lowGain.node.gain.value);
+			gCtx.lineTo(x*1,y - lowGain.node.gain.value);
+			gCtx.quadraticCurveTo(x*2, y - midGain.node.gain.value, x*3, y - midGain.node.gain.value);
+			gCtx.quadraticCurveTo(x*4, y - midGain.node.gain.value, x*5, y - highGain.node.gain.value);
+			gCtx.lineTo(gCanvas.width, y - highGain.node.gain.value);
+			gCtx.lineTo(gCanvas.width, gCanvas.height);
+			gCtx.lineTo(0, gCanvas.height);
+			gCtx.stroke();
+			gCtx.fill();
+		}
+		
+		// Draws a circle to xOffset, canvas.height.2 with a radius influenced by one of the three gain controls
+		function drawCircle(xOffset,gain) {
+			
+			for (var i = 0; i < data.length; ++i) {
+				var percent = data[i]/255;
+				var circleRadius = percent * ((gain+40)*3);
+
+				ctx.save();
+
+				var color1 = Math.floor(200 / (gain/40+1));
+				var color2 = Math.floor(color1+200 % 255);
+				var color3 = Math.floor(color1-200 % 255);
+
+				ctx.beginPath();
+				ctx.fillStyle=makeColor(color1,color2,color3, .34 - percent/3.0);
+				ctx.arc(xOffset, canvas.height/2, circleRadius, 0, 2 * Math.PI, false);
+				ctx.fill();
+				ctx.closePath();
+
+				ctx.beginPath();
+				ctx.fillStyle=makeColor(color1,color3,color2, .10 - percent/10.0);
+				ctx.arc(xOffset, canvas.height/2, circleRadius * 1.5, 0, 2 * Math.PI, false);
+				ctx.fill();
+				ctx.closePath();
+
+				ctx.beginPath();
+				ctx.fillStyle=makeColor(color1,color3,color2, .2 - percent/5.0);
+				ctx.arc(xOffset, canvas.height/2, circleRadius * .50, 0, 2 * Math.PI, false);
+				ctx.fill();
+				ctx.closePath();
+
+				ctx.restore();			
+			}
+		}
+
+        // Draws the title and time to the screen
+		function drawTitle() {
+			ctx.save();
+
+			ctx.translate(canvas.width/2,canvas.height/2);
+
+			// Draw text
+			ctx.strokeStyle = "black";
+			ctx.fillStyle = "white";
+			ctx.textAlign="center";
+			ctx.textBaseline="middle";
+
+			// Draw title
+			var counter = 0;
+			var fullTitle = [];
+			var titlePart = '';
+			var offset = currentStyle == "singleBar" ? 50 : 14;
+			ctx.font = "14px Audiowide";
+
+			for (var i = 0; i < title.length; ++i) {
+				counter += title[i].length;
+
+				if (counter >= 16 && currentStyle == "rainbowCircle") {
+					titlePart += "...";
+					break;
+				}
+				else {
+					titlePart += title[i];
+				}
+			}
+
+			if (titlePart.length > 0) {
+				fullTitle.push(titlePart);
+			}
+
+			offset -= fullTitle.length * 14;
+
+			for (var i = 0; i < fullTitle.length; ++i) {
+				offset += (i * 14);
+				ctx.strokeText(fullTitle[i], 0, offset); // add some black to help when circles displayed
+				ctx.fillText(fullTitle[i], 0, offset);
+			}
+
+			// Draw time
+			ctx.font = "12px Audiowide";
+			ctx.strokeText(currentTime, 0, offset + 16); // add some black to help when circles displayed
+			ctx.fillText(currentTime, 0, offset + 16);
+
+			ctx.restore();
+		}
+
+		 // FULL SCREEN MODE
+		function requestFullscreen(element) {
+			if (element.requestFullscreen) {
+			  element.requestFullscreen();
+			} else if (element.mozRequestFullscreen) {
+			  element.mozRequestFullscreen();
+			} else if (element.mozRequestFullScreen) { // camel-cased 'S' was changed to 's' in spec
+			  element.mozRequestFullScreen();
+			} else if (element.webkitRequestFullscreen) {
+			  element.webkitRequestFullscreen();
+			}
+			// .. and do nothing if the method is not supported
+		}
+
+		// Filter effects
+        // MIRROR - Mirrors the image across the hrz axix
+        // INVERT - Inverts the pixels
+        // GRAYSCALE - Converts the pixels to a gray scale
+		function manipulatePixels() {
+
+			// Get all the rgba pixel data of the canvas
+			var imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+
+			var data = imageData.data;
+			var length = data.length;
+			var height = imageData.height;
+			var width = imageData.width;
+
+
+			// mirror the image as to not casue issues with the filters?
+			if (mirror) {
+
+				// Grabbed from http://stackoverflow.com/questions/13932855/canvas-flip-half-the-image
+				for(var y = 0; y < height; y++) {
+				    for(var x = 0; x < width / 2; x++) { // divide by 2 to only loop through the left half of the image.
+				        var offset = ((width* y) + x) * 4; // Pixel origin
+
+				        // Get pixel
+				        var r = data[offset];
+				        var g = data[offset + 1];
+				        var b = data[offset + 2];
+				        var a = data[offset + 3];
+
+				        // Calculate how far to the right the mirrored pixel is
+				        var mirrorOffset = (width - (x * 2)) * 4;
+
+				        // Get set mirrored pixel's colours 
+				        data[offset + mirrorOffset] = r;
+				        data[offset + 1 + mirrorOffset] = g;
+				        data[offset + 2 + mirrorOffset] = b;
+				        data[offset + 3 + mirrorOffset] = a;
+				    }
+				}
+			}
+
+			// Iterate through each pixel
+
+			for (var i = 0; i < length; i += 4) {
+				if (invert) {
+					var red = data[i], green = data[i+1], blue = data[i+2];
+					data[i] = 255 - red;
+					data[i+1] = 255 - green;
+					data[i+2] = 255 - blue;
+				}
+				if (grayscale) {
+					// take the average
+					var avg = (data[i] + data[i+1] + data[i+3]) / 3;
+					data[i] = data[i+1] = data[i+2] = avg;
+				}
+			}
+
+			// put the data back on the canvas
+			ctx.putImageData(imageData,0,0);
+		}
+
+		// HELPER
+		function makeColor(red, green, blue, alpha){
+   			var color='rgba('+red+','+green+','+blue+', '+alpha+')';
+   			return color;
+		}
+
+        // Formats the time to 0:00 format
+		function formatTime(time) {
+			var min = Math.floor(time / 60);
+			var sec = Math.floor(time % 60);
+
+			if (sec < 10) {
+				sec = "0" + sec;
+			}
+
+			return min + ":" + sec;
+		}
+
+        // Formats the title to remove undesirable characters
+		function formatTitle(name) {
+
+			// magical land of regex
+			var regex = /(?![mp3])([\w'])+/g;
+			var strArray = name.match(regex);
+
+			title = [];
+
+			strArray.forEach(function(str) {
+				title.push(str + ' ');
+			});
+
+			return title;
+		}
+
+		// Handlers
+        // Changes the color of the slider to indicate it can be manipulated
+		function mouseover(e) {
+			if (!dragging) {
+				e.target.style.background = 'rgba(180,180,180,1)';
+
+				switch(e.target.id) { 
+				case "lowGain" : 
+				case "midGain" :
+				case "highGain" :
+					currentSlider = e.target.id;
+					break;
+				}
+			}
+		}
+
+        // Remove focus from the slider
+		function mouseleave(e) {
+			if (!dragging) e.target.style.background = 'white';
+		}
+
+        // Keep the slider background the darker background to indicate it is being controlled
+		function mousedown(e) {
+			dragging = true;
+			e.target.style.background = 'rgba(180,180,180,1)';
+		}
+
+        // Remove focus from the slider
+		function mouseup(e) {
+			dragging = false;
+
+			if (currentSlider != "") {
+				var node = document.getElementById(currentSlider);
+				node.style.background = "white";
+				currentSlider = "";
+			}
+		}
+
+        // Move the slider canvas so it reacts like a DOM slider and set the relative gain value
+		function mousemove(e) {
+			if (!dragging || currentSlider == "") {
+				return;
+			}
+
+			// store mouse y position exact not canvas position
+			var y = e.clientY;
+
+			// check y logic seems backwards but due to cordinate system of html
+			if (y >= SLIDER_MIN + 20) {
+				y = SLIDER_MIN + 20;
+			}
+			else if (y <= SLIDER_MAX + 80) {
+				y = SLIDER_MAX + 80;
+			}
+
+			// change the canvas position
+			var node = document.getElementById(currentSlider);
+			node.style.top = y - 20 + "px"; // mouse in the center of the slider
+
+			// change the gain
+			// gain determined by position .4 dB change per pixel
+			// 0 is located at 300 px
+			// reverse due to coord system
+			var gain = -(y - 330.0) * .5;
+
+			switch(node.id) {
+				case "lowGain" :
+					lowGain.node.gain.value = gain;
+					break;
+				case "midGain" :
+					midGain.node.gain.value = gain;
+					break;
+				case "highGain" :
+					highGain.node.gain.value = gain;
+					break;
+			}
+		}
+
+		// Drag and drop code modified from 
+		// https://developer.mozilla.org/en-US/docs/Using_files_from_web_applications
+		function dragleave(e) {
+			e.stopPropagation(); // Prevents further propagation of the current event
+			e.preventDefault();  // cancels the event if it is cancelable
+
+			if (e.target.id == 'mainCanvas') {
+				e.target.style.background = 'black';
+			}
+		}
+
+		function dragenter(e) {
+			e.stopPropagation();
+			e.preventDefault();
+
+			if (e.target.id == 'mainCanvas') {
+				e.target.style.background = 'rgba(122,122,122,.6)';
+			}
+		}
+
+		function dragover(e) {
+			e.stopPropagation();
+			e.preventDefault();
+		}
+
+        // Grabs files being dropped and passes them over to handle files to be processed
+		function drop(e) {
+			e.stopPropagation();
+			e.preventDefault();
+			if (e.target.id == 'mainCanvas') {
+				e.target.style.background = 'black';
+			}
+			var dt = e.dataTransfer;
+			var files = dt.files;
+
+			handleFiles(files);
+		}
+
+        // Takes in a one or more files. If more than one | the file is not an mp3 breaks out of the function
+        // Take the files blob address and creates a new trackselect object to be used.
+		function handleFiles(file,e) {
+		
+			// Abandon Ship
+			if (file.length > 1) {
+				alert("Too many files selected! Try selecting one file");
+			}
+			else if (file[0].name.indexOf(".mp3") == -1) {
+				alert("You must select a MP3 file!")
+			}
+			else {
+
+				var location = window.URL.createObjectURL(file[0]);
+				title = formatTitle(file[0].name);
+
+				// add element to track select
+				var name = '';
+				title.forEach(function(str){
+					name += str;
+				});
+
+				var track = document.getElementById("trackSelect");
+				var option = document.createElement("option");
+				option.text = name;
+				option.value = location;
+				var index = document.getElementById("trackSelect").selectedIndex;
+				track.add(option, index);
+				option.onload = function() {
+					window.URL.revokeObjectURL(this.src);
+				};
+				track.getElementsByTagName('option')[index].selected = 'selected';
+				playStream(audioElement,location,name);
+			}		
+		}
+		
+		window.addEventListener("load",init);
+	}());
+		
+	</script>
+</head>
+<body>
+	<header>
+		Audio Visualizer
+	</header>
+	<div id=display>
+		<canvas id="mainCanvas" width="640" height="400"></canvas>
+		<canvas id="soundBoard" width="225" height="400"></canvas>
+		<canvas id="graph" width="205" height="120"></canvas>
+		<canvas id="lowGain" width="20" height="40"></canvas>
+		<canvas id="midGain" width="20" height="40"></canvas>
+		<canvas id="highGain" width="20" height="40"></canvas>
+        <audio controls loop id="audioData"></audio><br>
+	</div>
+	<div id="controls">
+		<label>Track: 
+			<select id="trackSelect" >
+				<option value="media/New Adventure Theme.mp3">New Adventure Theme</option>
+				<option value="media/Peanuts Theme.mp3">Peanuts Theme</option>
+				<option value="media/The Picard Song.mp3">The Picard Song</option>
+				<option value="media/Infinite Power.mp3">Infinite Power</option>
+				<option value="select">Select...</option>
+			</select>
+			<input type="file" id="myFile" accept=".mp3">
+		</label>
+		<label id="status">???</label>
+		<button id="fsButton">Go Full Screen</button>
+	</div>
+	<div id="filters">
+		<Label>Filters:</Label>
+		<span>
+			<input type="checkbox" id="invertCheckbox">
+			<label for="invertCheckbox">Invert |</label>		
+		</span>
+		<span>
+			<input type="checkbox" id="grayscaleCheckbox">		
+			<label for="grayscaleCheckbox">Grayscale |</label>
+		</span>
+		<span>
+			<input type="checkbox" id="mirrorCheckbox">
+			<label for="mirrorCheckbox">Mirror Image</label>
+		</span>
+	</div>
+	<div id="style">
+		<label>Style:
+			<form id="visualStyle">
+				<input type="radio" name="style" value="rainbowCircle" checked="">Rainbow Circle<br>
+				<input type="radio" name="style" value="doubleBar">Double Bar<br>
+				<input type="radio" name="style" value="singleBar">Oscillator<br>
+				<input type="radio" name="style" value="circles">Circles
+			</form>
+		</label>
+	</div>
+</body>
+</html>
